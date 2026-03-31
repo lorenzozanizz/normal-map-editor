@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Heightmap Editor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            background: #0f0f0f;
+            font-family: 'Courier New', monospace;
+            color: #eee;
+            overflow: hidden;
+        }
+
+        .panel {
+            position: relative;
+            border-right: 1px solid #333;
+            background: #1a1a1a;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 12px;
+            background: #0f0f0f;
+            border-bottom: 1px solid #333;
+            font-size: 12px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: #888;
+        }
+
+        #heightmap {
+            flex: 1;
+            border-right: 2px solid #444;
+        }
+
+        #viewer-panel {
+            flex: 1;
+            border-right: 2px solid #444;
+        }
+
+        #preview-panel {
+            flex: 1;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        .resizer {
+            width: 8px;
+            background: #222;
+            cursor: col-resize;
+            user-select: none;
+            transition: background 0.2s;
+        }
+
+        .resizer:hover {
+            background: #444;
+        }
+
+        .resizer.dragging {
+            background: #0a0;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 5px;
+            padding: 8px;
+            background: #0f0f0f;
+            border-bottom: 1px solid #333;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 6px 12px;
+            background: #222;
+            border: 1px solid #444;
+            color: #aaa;
+            cursor: pointer;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            border-radius: 2px;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: #333;
+            color: #fff;
+            border-color: #666;
+        }
+
+        button.active {
+            background: #0a0;
+            color: #000;
+            border-color: #0a0;
+        }
+
+        .slider-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 8px;
+        }
+
+        label {
+            font-size: 11px;
+            width: 50px;
+            color: #888;
+        }
+
+        input[type="range"] {
+            width: 80px;
+            cursor: pointer;
+        }
+
+        .info-text {
+            font-size: 10px;
+            color: #555;
+            padding: 8px;
+            border-top: 1px solid #333;
+            background: #0f0f0f;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Left Panel: Grayscale Paint Editor -->
+    <div class="panel" id="heightmap">
+        <div class="panel-header">Grayscale Editor</div>
+        <div class="toolbar">
+            <button id="brush-btn" class="active">Brush</button>
+            <button id="eraser-btn">Eraser</button>
+            <button id="clear-btn">Clear</button>
+        </div>
+        <div class="slider-group">
+            <label>Brush:</label>
+            <input type="range" id="brush-size" min="1" max="50" value="10">
+            <span id="brush-size-val">10</span>px
+        </div>
+        <canvas id="grayscale-canvas"></canvas>
+        <div class="info-text">Left click to paint | Right click to pick color</div>
+    </div>
+
+    <div class="resizer" id="resizer-1"></div>
+
+    <!-- Middle Panel: 3D Viewer -->
+    <div class="panel" id="viewer-panel">
+        <div class="panel-header">3D Heightmap Viewer</div>
+        <canvas id="three-canvas"></canvas>
+        <div class="info-text">Drag to rotate | Scroll to zoom</div>
+    </div>
+
+    <div class="resizer" id="resizer-2"></div>
+
+    <!-- Right Panel: Normal Map Preview -->
+    <div class="panel" id="preview-panel">
+        <div class="panel-header">Normal Map Preview</div>
+        <canvas id="normal-canvas"></canvas>
+        <div class="info-text">Real-time normal map visualization</div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // ==================== SHARED STATE ====================
+        const WIDTH = 128;
+        const HEIGHT = 128;
+        let heightmapData = new Uint8Array(WIDTH * HEIGHT);
+        heightmapData.fill(128); // Start at middle gray
+
+        // ==================== GRAYSCALE EDITOR ====================
+        const gCanvas = document.getElementById('grayscale-canvas');
+        const gCtx = gCanvas.getContext('2d');
+        const brushSizeSlider = document.getElementById('brush-size');
+        const brushSizeVal = document.getElementById('brush-size-val');
+        const brushBtn = document.getElementById('brush-btn');
+        const eraserBtn = document.getElementById('eraser-btn');
+        const clearBtn = document.getElementById('clear-btn');
+
+        let isBrush = true;
+        let brushSize = 10;
+        let isDrawing = false;
+        let currentColor = 0;
+
+        function resizeGrayscaleCanvas() {
+        const rect = document.getElementById('heightmap').getBoundingClientRect();
+        gCanvas.width = rect.width;
+        gCanvas.height = rect.height - 110; // Account for toolbar
+        redrawGrayscale();
+        }
+
+        function redrawGrayscale() {
+        gCtx.fillStyle = '#1a1a1a';
+        gCtx.fillRect(0, 0, gCanvas.width, gCanvas.height);
+
+        // Draw heightmap as grayscale
+        const imgData = gCtx.createImageData(WIDTH, HEIGHT);
+        for (let i = 0; i < WIDTH * HEIGHT; i++) {
+        const val = heightmapData[i];
+        imgData.data[i * 4 + 0] = val;
+        imgData.data[i * 4 + 1] = val;
+        imgData.data[i * 4 + 2] = val;
+        imgData.data[i * 4 + 3] = 255;
+        }
+
+        const scaleX = gCanvas.width / WIDTH;
+        const scaleY = gCanvas.height / HEIGHT;
+
+        gCtx.putImageData(imgData, 0, 0);
+        gCtx.scale(scaleX, scaleY);
+        }
+
+        gCanvas.addEventListener('mousedown', (e) => {
+        isDrawing = true;
+        const rect = gCanvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / (rect.width / WIDTH);
+        const y = (e.clientY - rect.top) / (rect.height / HEIGHT);
+
+        if (e.button === 2) {
+        // Right click: pick color
+        const idx = Math.floor(y) * WIDTH + Math.floor(x);
+        currentColor = heightmapData[idx];
+        } else {
+        paintBrush(x, y);
+        }
+        });
+
+        gCanvas.addEventListener('mousemove', (e) => {
+        if (!isDrawing) return;
+        if (e.buttons === 0) {
+        isDrawing = false;
+        return;
+        }
+
+        const rect = gCanvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / (rect.width / WIDTH);
+        const y = (e.clientY - rect.top) / (rect.height / HEIGHT);
+        paintBrush(x, y);
+        });
+
+        gCanvas.addEventListener('mouseup', () => {
+        isDrawing = false;
+        updateAll();
+        });
+
+        gCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        function paintBrush(x, y) {
+        const radius = brushSize;
+        for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dy * dy > radius * radius) continue;
+
+        const px = Math.floor(x + dx);
+        const py = Math.floor(y + dy);
+
+        if (px >= 0 && px < WIDTH && py >= 0 && py < HEIGHT) {
+        const idx = py * WIDTH + px;
+        if (isBrush) {
+        heightmapData[idx] = Math.min(255, heightmapData[idx] + 15);
+        } else {
+        heightmapData[idx] = Math.max(0, heightmapData[idx] - 15);
+        }
+        }
+        }
+        }
+        redrawGrayscale();
+        }
+
+        brushSizeSlider.addEventListener('change', (e) => {
+        brushSize = parseInt(e.target.value);
+        brushSizeVal.textContent = brushSize;
+        });
+
+        brushBtn.addEventListener('click', () => {
+        isBrush = true;
+        brushBtn.classList.add('active');
+        eraserBtn.classList.remove('active');
+        });
+
+        eraserBtn.addEventListener('click', () => {
+        isBrush = false;
+        eraserBtn.classList.add('active');
+        brushBtn.classList.remove('active');
+        });
+
+        clearBtn.addEventListener('click', () => {
+        heightmapData.fill(128);
+        redrawGrayscale();
+        updateAll();
+        });
+
+        // ==================== 3D VIEWER ====================
+        const threeCanvas = document.getElementById('three-canvas');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a1a);
+
+        let camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+        camera.position.set(0, 3, 3);
+
+        let renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true });
+        let controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        let mesh = null;
+        let geometry = null;
+        let material = null;
+
+        function create3DMesh() {
+        // Remove old mesh
+        if (mesh) scene.remove(mesh);
+        if (geometry) geometry.dispose();
+        if (material) material.dispose();
+
+        // Create new geometry from heightmap
+        geometry = new THREE.PlaneGeometry(4, 4, WIDTH - 1, HEIGHT - 1);
+        const pos = geometry.attributes.position;
+
+        for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i);
+        const y = pos.getY(i);
+
+        // Map to heightmap coordinates
+        const hx = Math.floor((x / 4 + 0.5) * (WIDTH - 1));
+        const hy = Math.floor((y / 4 + 0.5) * (HEIGHT - 1));
+        const idx = hy * WIDTH + hx;
+
+        const z = ((heightmapData[idx] || 128) / 255.0 - 0.5) * 2;
+        pos.setZ(i, z);
+        }
+
+        pos.needsUpdate = true;
+        geometry.computeVertexNormals();
+
+        material = new THREE.MeshStandardMaterial({
+        color: 0xaaaaaa,
+        metalness: 0.2,
+        roughness: 0.8,
+        side: THREE.DoubleSide
+        });
+
+        mesh = new THREE.Mesh(geometry, material);
+        scene.add(mesh);
+        }
+
+        function resizeThreeCanvas() {
+        const rect = document.getElementById('viewer-panel').getBoundingClientRect();
+        const width = rect.width;
+        const height = rect.height - 30; // Account for header
+
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+        renderer.setSize(width, height);
+        }
+
+        // Lighting
+        scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+        const light = new THREE.DirectionalLight(0xffffff, 0.8);
+        light.position.set(5, 10, 5);
+        scene.add(light);
+
+        function animate3D() {
+        requestAnimationFrame(animate3D);
+        controls.update();
+        renderer.render(scene, camera);
+        }
+
+        // ==================== NORMAL MAP PREVIEW ====================
+        const normCanvas = document.getElementById('normal-canvas');
+        const normCtx = normCanvas.getContext('2d');
+
+        function resizeNormalCanvas() {
+        const rect = document.getElementById('preview-panel').getBoundingClientRect();
+        normCanvas.width = rect.width;
+        normCanvas.height = rect.height - 30;
+        updateNormalMap();
+        }
+
+        function updateNormalMap() {
+        const imgData = normCtx.createImageData(WIDTH, HEIGHT);
+
+        for (let y = 0; y < HEIGHT; y++) {
+        for (let x = 0; x < WIDTH; x++) {
+        const idx = y * WIDTH + x;
+
+        // Simple normal calculation from heightmap
+        const h0 = heightmapData[idx];
+        const hx = x < WIDTH - 1 ? heightmapData[y * WIDTH + x + 1] : h0;
+        const hy = y < HEIGHT - 1 ? heightmapData[(y + 1) * WIDTH + x] : h0;
+
+        const dx = (hx - h0) / 255.0;
+        const dy = (hy - h0) / 255.0;
+
+        // Simple normal from height gradient
+        let nx = -dx;
+        let ny = -dy;
+        let nz = 0.5;
+
+        const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        nx /= len;
+        ny /= len;
+        nz /= len;
+
+        // Convert to RGB
+        imgData.data[idx * 4 + 0] = Math.floor((nx + 1) * 127.5);
+        imgData.data[idx * 4 + 1] = Math.floor((ny + 1) * 127.5);
+        imgData.data[idx * 4 + 2] = Math.floor((nz + 1) * 127.5);
+        imgData.data[idx * 4 + 3] = 255;
+        }
+        }
+
+        // Scale up to canvas
+        const scaleX = normCanvas.width / WIDTH;
+        const scaleY = normCanvas.height / HEIGHT;
+        const scaledData = normCtx.createImageData(normCanvas.width, normCanvas.height);
+
+        for (let y = 0; y < normCanvas.height; y++) {
+        for (let x = 0; x < normCanvas.width; x++) {
+        const sx = Math.floor(x / scaleX);
+        const sy = Math.floor(y / scaleY);
+        const sIdx = (sy * WIDTH + sx) * 4;
+        const dIdx = (y * normCanvas.width + x) * 4;
+
+        scaledData.data[dIdx + 0] = imgData.data[sIdx + 0];
+        scaledData.data[dIdx + 1] = imgData.data[sIdx + 1];
+        scaledData.data[dIdx + 2] = imgData.data[sIdx + 2];
+        scaledData.data[dIdx + 3] = 255;
+        }
+        }
+
+        normCtx.putImageData(scaledData, 0, 0);
+        }
+
+        // ==================== LAYOUT & RESIZE ====================
+        function updateAll() {
+        create3DMesh();
+        updateNormalMap();
+        }
+
+        function setupResizers() {
+        const resizer1 = document.getElementById('resizer-1');
+        const resizer2 = document.getElementById('resizer-2');
+        const editorPanel = document.getElementById('heightmap');
+        const viewerPanel = document.getElementById('viewer-panel');
+        const previewPanel = document.getElementById('preview-panel');
+
+        function startResize(e, resizerNum) {
+        e.preventDefault();
+        const startX = e.clientX;
+        const startEditorWidth = editorPanel.offsetWidth;
+        const startViewerWidth = viewerPanel.offsetWidth;
+        const startPreviewWidth = previewPanel.offsetWidth;
+
+        document.body.style.cursor = 'col-resize';
+
+        const moveFn = (e) => {
+        const delta = e.clientX - startX;
+
+        if (resizerNum === 1) {
+        const newEditorWidth = Math.max(200, startEditorWidth + delta);
+        const newViewerWidth = Math.max(200, startViewerWidth - delta);
+        editorPanel.style.flex = `0 0 ${newEditorWidth}px`;
+        viewerPanel.style.flex = `0 0 ${newViewerWidth}px`;
+        } else if (resizerNum === 2) {
+        const newViewerWidth = Math.max(200, startViewerWidth + delta);
+        const newPreviewWidth = Math.max(200, startPreviewWidth - delta);
+        viewerPanel.style.flex = `0 0 ${newViewerWidth}px`;
+        previewPanel.style.flex = `0 0 ${newPreviewWidth}px`;
+        }
+        };
+
+        const endResize = () => {
+        document.removeEventListener('mousemove', moveFn);
+        document.removeEventListener('mouseup', endResize);
+        document.body.style.cursor = 'default';
+        resizeGrayscaleCanvas();
+        resizeThreeCanvas();
+        resizeNormalCanvas();
+        };
+
+        document.addEventListener('mousemove', moveFn);
+        document.addEventListener('mouseup', endResize);
+        }
+
+        resizer1.addEventListener('mousedown', (e) => startResize(e, 1));
+        resizer2.addEventListener('mousedown', (e) => startResize(e, 2));
+        }
+
+        // ==================== INITIALIZATION ====================
+        setupResizers();
+        resizeGrayscaleCanvas();
+        resizeThreeCanvas();
+        resizeNormalCanvas();
+        create3DMesh();
+        animate3D();
+
+        window.addEventListener('resize', () => {
+        resizeGrayscaleCanvas();
+        resizeThreeCanvas();
+        resizeNormalCanvas();
+        });
+
+        // Global functions for external updates
+        window.updateHeightmap = (data) => {
+        heightmapData = new Uint8Array(data);
+        updateAll();
+        };
+
+        window.getHeightmapData = () => heightmapData;
+        window.saveHeightmap = () => {
+        const json = JSON.stringify(Array.from(heightmapData));
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'heightmap.json';
+        a.click();
+        };
+    </script>
+</body>
+</html>
